@@ -114,8 +114,7 @@ export async function markAbsenteesForCompany(companyId, options = {}) {
         branchId: true,
         departmentId: true,
         joiningDate: true,
-        status: true,
-        deletedAt: true
+        status: true
       }
     }),
     prisma.leaveRequest.findMany({
@@ -242,14 +241,14 @@ export async function markAbsenteesForCompany(companyId, options = {}) {
       continue;
     }
 
-    // Skip inactive or deleted employees
-    if (employee.status !== 'ACTIVE' || employee.deletedAt) {
+    // Skip inactive employees
+    if (employee.status !== 'ACTIVE') {
       skippedCount++;
       details.push({
         employeeId: empId,
         employeeCode: employee.employeeCode,
         action: 'SKIPPED',
-        reason: 'INACTIVE_OR_DELETED'
+        reason: 'INACTIVE_STATUS'
       });
       continue;
     }
