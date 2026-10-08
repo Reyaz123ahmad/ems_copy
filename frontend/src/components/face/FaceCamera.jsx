@@ -73,12 +73,15 @@ export default function FaceCamera({ onCapture, disabled = false }) {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const base64 = canvas.toDataURL('image/jpeg', 0.9);
     setCapturedPhoto(base64);
+    // Explicitly release camera hardware stream on capture
+    stopCamera();
     if (onCapture) onCapture(base64);
   };
 
   const retake = () => {
     setCapturedPhoto(null);
     if (onCapture) onCapture(null);
+    setFacingMode((prev) => prev); // trigger camera re-init
   };
 
   const toggleCamera = () => {

@@ -1,6 +1,7 @@
 import { prisma } from '../../../config/prisma.js';
 import logger from '../../../config/logger.js';
 import attendanceService from '../attendance.service.js';
+import { startOfDayIST, endOfDayIST, formatDateIST } from '../../../utils/date.js';
 
 const DAY_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
 
@@ -51,22 +52,18 @@ export async function markAbsenteesForCompany(companyId, options = {}) {
   const now = options.currentTime ? new Date(options.currentTime) : new Date();
   const force = Boolean(options.forceAllShifts);
 
-  const dayOfWeek = targetDate.getDay(); // 0 = Sunday, 1 = Monday, ...
+  const startOfDay = startOfDayIST(targetDate);
+  const endOfDay = endOfDayIST(targetDate);
+  const dayOfWeek = startOfDay.getDay(); // 0 = Sunday, 1 = Monday, ...
   const currentDayName = DAY_NAMES[dayOfWeek];
-
-  const y = targetDate.getFullYear();
-  const m = targetDate.getMonth();
-  const d = targetDate.getDate();
-  const startOfDay = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
-  const endOfDay = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
 
   // 1. Company-wide Holiday Check
   const holidayInfo = await attendanceService.checkHoliday(companyId, targetDate).catch(() => ({ isHoliday: false, holiday: null }));
   if (holidayInfo?.isHoliday) {
-    logger.info({ companyId, holiday: holidayInfo.holiday?.name, date: startOfDay.toISOString().slice(0, 10) }, 'Skipping absent marking: Company holiday today');
+    logger.info({ companyId, holiday: holidayInfo.holiday?.name, date: formatDateIST(startOfDay) }, 'Skipping absent marking: Company holiday today');
     return {
       companyId,
-      date: startOfDay.toISOString().slice(0, 10),
+      date: formatDateIST(startOfDay),
       marked: 0,
       skipped: 'ALL',
       reason: 'HOLIDAY',
@@ -109,7 +106,17 @@ export async function markAbsenteesForCompany(companyId, options = {}) {
     }),
     prisma.employee.findMany({
       where: { companyId, status: 'ACTIVE' },
-      select: { id: true, firstName: true, lastName: true, employeeCode: true, branchId: true, departmentId: true }
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true,
+        branchId: true,
+        departmentId: true,
+        joiningDate: true,
+        status: true,
+        deletedAt: true
+      }
     }),
     prisma.leaveRequest.findMany({
       where: {
@@ -222,6 +229,30 @@ export async function markAbsenteesForCompany(companyId, options = {}) {
 
   for (const employee of employees) {
     const empId = employee.id;
+
+    // 0. Joining Date Check (Issue 2 Fix: Skip employees whose joiningDate > targetDate)
+    if (employee.joiningDate && startOfDayIST(employee.joiningDate) > startOfDay) {
+      skippedCount++;
+      details.push({
+        employeeId: empId,
+        employeeCode: employee.employeeCode,
+        action: 'SKIPPED',
+        reason: 'BEFORE_JOINING_DATE'
+      });
+      continue;
+    }
+
+    // Skip inactive or deleted employees
+    if (employee.status !== 'ACTIVE' || employee.deletedAt) {
+      skippedCount++;
+      details.push({
+        employeeId: empId,
+        employeeCode: employee.employeeCode,
+        action: 'SKIPPED',
+        reason: 'INACTIVE_OR_DELETED'
+      });
+      continue;
+    }
 
     // A. Weekly Off Check for individual employee
     const customOff = customWeeklyOffByEmpId.get(empId);

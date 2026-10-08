@@ -12,6 +12,7 @@ import { advancedSecurityService } from '../advanced-security/advanced-security.
 import { prisma } from '../../config/prisma.js';
 import * as faceService from '../../services/face.service.js';
 import { decryptData } from '../../security/encryption.js';
+import { startOfDayIST, endOfDayIST, formatDateIST } from '../../utils/date.js';
 
 export function getZonedDateParts(date = new Date(), timeZone = 'Asia/Kolkata') {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -90,8 +91,8 @@ export function getCheckInWindow({ shift, now = new Date(), date = new Date(), t
   const shiftStart = window.shiftStart;
   const shiftEnd = window.shiftEnd;
   const graceMinutes = window.graceMinutes;
-  const fiveMinBefore = addMinutes(shiftStart, -5);
-  const graceCutoff = window.graceCutoff;
+  const earlyWindowStart = addMinutes(shiftStart, -120); // Allow check-in up to 2 hours early
+  const graceCutoff = window.graceCutoff; // shiftStart + graceMinutes
 
   const nowObj = now instanceof Date ? now : new Date(now);
   const nowTime = nowObj.getTime();
@@ -105,11 +106,11 @@ export function getCheckInWindow({ shift, now = new Date(), date = new Date(), t
   const graceZoned = getZonedDateParts(graceCutoff, timeZone);
   const graceTimeStr = `${String(graceZoned.hour).padStart(2, '0')}:${String(graceZoned.minute).padStart(2, '0')}`;
 
-  if (nowTime < fiveMinBefore.getTime()) {
+  if (nowTime < earlyWindowStart.getTime()) {
     windowStatus = 'BEFORE_WINDOW';
     canCheckIn = false;
     const minsUntil = Math.max(0, Math.floor((shiftStart.getTime() - nowTime) / 60000));
-    checkInBlockReason = `Your shift starts in ${minsUntil} minutes (at ${startTimeStr}). Cannot check in yet.`;
+    checkInBlockReason = `Your shift starts in ${minsUntil} minutes (at ${startTimeStr}). Check-in opens 2 hours before shift start.`;
   } else if (nowTime <= graceCutoff.getTime()) {
     windowStatus = 'WINDOW_OPEN';
     canCheckIn = true;
@@ -135,7 +136,8 @@ export function getCheckInWindow({ shift, now = new Date(), date = new Date(), t
   return {
     shiftStart,
     shiftEnd,
-    fiveMinBefore,
+    fiveMinBefore: earlyWindowStart,
+    earlyWindowStart,
     graceCutoff,
     windowStatus,
     canCheckIn,
@@ -794,9 +796,8 @@ export const attendanceService = {
       breaks: []
     };
 
-    const startOfDay = new Date();
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const cacheKey = `${empId}_${startOfDay.toISOString().split('T')[0]}`;
+    const startOfDay = startOfDayIST(new Date());
+    const cacheKey = `${empId}_${formatDateIST(startOfDay)}`;
     if (!global._todayAttendanceCache) global._todayAttendanceCache = new Map();
     global._todayAttendanceCache.set(cacheKey, { data: logData, expiresAt: Date.now() + 60000 });
 
@@ -1275,9 +1276,8 @@ export const attendanceService = {
       });
 
       // Update in-memory cache if active
-      const startOfDay = new Date(todayLog.attendanceDate || new Date());
-      startOfDay.setUTCHours(0, 0, 0, 0);
-      const cacheKey = `${empId}_${startOfDay.toISOString().split('T')[0]}`;
+      const startOfDay = startOfDayIST(todayLog.attendanceDate || new Date());
+      const cacheKey = `${empId}_${formatDateIST(startOfDay)}`;
       if (global._todayAttendanceCache && global._todayAttendanceCache.has(cacheKey)) {
         const cached = global._todayAttendanceCache.get(cacheKey);
         if (cached && cached.data) {

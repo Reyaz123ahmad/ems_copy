@@ -4,6 +4,7 @@ import { useEmployee, useRegisterFace } from '../../hooks/useEmployee.js';
 import { Card } from '../../components/ui/Card.jsx';
 import { Button } from '../../components/ui/Button.jsx';
 import { Spinner } from '../../components/ui/Spinner.jsx';
+import { CheckCircle2, Camera, RefreshCw } from 'lucide-react';
 
 export function RegisterFacePage() {
   const { id } = useParams();
@@ -12,46 +13,54 @@ export function RegisterFacePage() {
   const { data, isLoading } = useEmployee(id);
   const registerFaceMutation = useRegisterFace();
 
+  const streamRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [capturedImage, setCapturedImage] = useState(null);
-  const [livenessPassed, setLivenessPassed] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
-  const employee = data?.data?.employee;
+  const employee = data?.data?.employee || data?.employee || data;
+
+  // Stop webcam and release hardware track locks
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        track.stop();
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraActive(false);
+  };
 
   // Start webcam
   const startCamera = async () => {
     try {
       setErrorMsg('');
+      stopCamera();
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480, facingMode: 'user' }
       });
+      streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        setCameraActive(true);
       }
+      setCameraActive(true);
     } catch (err) {
       setErrorMsg('Camera access denied or unavailable. Please enable permissions.');
     }
   };
 
-  // Stop webcam
-  const stopCamera = () => {
-    if (videoRef.current?.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach((track) => track.stop());
-      videoRef.current.srcObject = null;
-      setCameraActive(false);
-    }
-  };
-
+  // Cleanup camera stream when navigating away or unmounting
   useEffect(() => {
-    return () => stopCamera();
+    return () => {
+      stopCamera();
+    };
   }, []);
 
   // Capture current video frame
@@ -67,19 +76,16 @@ export function RegisterFacePage() {
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
     setCapturedImage(dataUrl);
+
+    // Stop camera immediately after snapshot is captured
     stopCamera();
 
-    // Simulate AI liveness check
-    setIsProcessing(true);
-    setTimeout(() => {
-      setIsProcessing(false);
-      setLivenessPassed(true);
-    }, 1200);
+    // DEV: Liveness check disabled for employee face registration
   };
 
   const handleRetake = () => {
     setCapturedImage(null);
-    setLivenessPassed(false);
+    setSuccessMsg('');
     startCamera();
   };
 
@@ -97,6 +103,9 @@ export function RegisterFacePage() {
           embedding: mockEmbedding
         }
       });
+
+      // Explicitly terminate camera stream on successful face registration
+      stopCamera();
 
       setSuccessMsg('Face biometric profile successfully registered and linked!');
       setTimeout(() => {
@@ -127,7 +136,13 @@ export function RegisterFacePage() {
             </span>
           </p>
         </div>
-        <Button variant="ghost" onClick={() => navigate(`/employees/${id}`)}>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            stopCamera();
+            navigate(`/employees/${id}`);
+          }}
+        >
           Cancel
         </Button>
       </div>
@@ -139,8 +154,9 @@ export function RegisterFacePage() {
       )}
 
       {successMsg && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm">
-          {successMsg}
+        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm flex items-center gap-2">
+          <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+          <span>{successMsg}</span>
         </div>
       )}
 
@@ -162,10 +178,7 @@ export function RegisterFacePage() {
           {!cameraActive && !capturedImage && (
             <div className="text-center p-6 space-y-3">
               <div className="w-16 h-16 mx-auto rounded-full bg-slate-900 flex items-center justify-center text-slate-400 border border-slate-800">
-                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
+                <Camera className="w-8 h-8" />
               </div>
               <p className="text-sm font-medium text-slate-300">Camera is inactive</p>
               <Button onClick={startCamera} className="bg-blue-600 hover:bg-blue-500">
@@ -174,37 +187,19 @@ export function RegisterFacePage() {
             </div>
           )}
 
-          {/* Oval Face Guide Overlay */}
+          {/* Face Guide Overlay */}
           {cameraActive && (
             <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
               <div className="w-48 h-64 rounded-[50%] border-2 border-dashed border-blue-400/70 shadow-[0_0_15px_rgba(59,130,246,0.3)] animate-pulse" />
-            </div>
-          )}
-
-          {/* Liveness Scanning Indicator */}
-          {isProcessing && (
-            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
-              <Spinner size="lg" className="text-blue-500" />
-              <p className="text-sm font-semibold text-white animate-pulse">Running AI Liveness Check...</p>
             </div>
           )}
         </div>
 
         <canvas ref={canvasRef} className="hidden" />
 
-        {/* Liveness status message */}
-        {livenessPassed && (
-          <div className="mt-4 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
-            </svg>
-            Liveness Verified • 128-D Biometric Embedding Generated
-          </div>
-        )}
-
         {/* Controls */}
         <div className="mt-6 flex items-center gap-3">
-          {cameraActive && (
+          {cameraActive && !capturedImage && (
             <Button
               onClick={capturePhoto}
               className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-lg"
@@ -215,14 +210,19 @@ export function RegisterFacePage() {
 
           {capturedImage && (
             <>
-              <Button variant="outline" onClick={handleRetake} disabled={registerFaceMutation.isPending}>
-                Retake Photo
+              <Button
+                variant="outline"
+                onClick={handleRetake}
+                disabled={registerFaceMutation.isPending}
+                className="flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Re-capture Photo
               </Button>
               <Button
                 variant="primary"
                 onClick={handleSaveFace}
                 isLoading={registerFaceMutation.isPending}
-                disabled={!livenessPassed || registerFaceMutation.isPending}
                 className="bg-emerald-600 hover:bg-emerald-500"
               >
                 Save Biometrics

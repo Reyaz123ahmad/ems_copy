@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma.js';
+import { startOfDayIST, endOfDayIST, formatDateIST } from '../../utils/date.js';
 
 if (!global._todayAttendanceCache) global._todayAttendanceCache = new Map();
 
@@ -8,9 +9,8 @@ export const attendanceRepository = {
    */
   async findTodayAttendance(employeeId, date = new Date()) {
     if (!employeeId) return null;
-    const startOfDay = new Date(date);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const cacheKey = `${employeeId}_${startOfDay.toISOString().split('T')[0]}`;
+    const startOfDay = startOfDayIST(date);
+    const cacheKey = `${employeeId}_${formatDateIST(startOfDay)}`;
     
     const cached = global._todayAttendanceCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt) {
@@ -39,8 +39,7 @@ export const attendanceRepository = {
    * Find attendance log by date
    */
   async findAttendanceByDate(employeeId, date) {
-    const targetDate = new Date(date);
-    targetDate.setUTCHours(0, 0, 0, 0);
+    const targetDate = startOfDayIST(date);
 
     return prisma.attendanceLog.findFirst({
       where: {
@@ -57,9 +56,8 @@ export const attendanceRepository = {
    * Create an attendance check-in record
    */
   async createAttendanceLog(data) {
-    const targetDate = new Date(data.attendanceDate || new Date());
-    targetDate.setUTCHours(0, 0, 0, 0);
-    const cacheKey = `${data.employeeId}_${targetDate.toISOString().split('T')[0]}`;
+    const targetDate = startOfDayIST(data.attendanceDate || new Date());
+    const cacheKey = `${data.employeeId}_${formatDateIST(targetDate)}`;
     global._todayAttendanceCache.delete(cacheKey);
 
     const logData = {
@@ -136,9 +134,8 @@ export const attendanceRepository = {
     });
 
     if (res.employeeId && res.attendanceDate) {
-      const startOfDay = new Date(res.attendanceDate);
-      startOfDay.setUTCHours(0, 0, 0, 0);
-      const cacheKey = `${res.employeeId}_${startOfDay.toISOString().split('T')[0]}`;
+      const startOfDay = startOfDayIST(res.attendanceDate);
+      const cacheKey = `${res.employeeId}_${formatDateIST(startOfDay)}`;
       const existing = global._todayAttendanceCache.get(cacheKey)?.data || {};
       const merged = { ...existing, ...res };
       global._todayAttendanceCache.set(cacheKey, { data: merged, expiresAt: Date.now() + 60000 });
@@ -184,14 +181,10 @@ export const attendanceRepository = {
     if (effectiveStartDate || effectiveEndDate) {
       where.attendanceDate = {};
       if (effectiveStartDate && !isNaN(new Date(effectiveStartDate).getTime())) {
-        const sDate = new Date(effectiveStartDate);
-        sDate.setUTCHours(0, 0, 0, 0);
-        where.attendanceDate.gte = sDate;
+        where.attendanceDate.gte = startOfDayIST(effectiveStartDate);
       }
       if (effectiveEndDate && !isNaN(new Date(effectiveEndDate).getTime())) {
-        const eDate = new Date(effectiveEndDate);
-        eDate.setUTCHours(23, 59, 59, 999);
-        where.attendanceDate.lte = eDate;
+        where.attendanceDate.lte = endOfDayIST(effectiveEndDate);
       }
       if (Object.keys(where.attendanceDate).length === 0) {
         delete where.attendanceDate;
@@ -265,7 +258,7 @@ export const attendanceRepository = {
    */
   async createAttendanceBreak(data) {
     if (data.employeeId) {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = formatDateIST(new Date());
       global._todayAttendanceCache.delete(`${data.employeeId}_${todayStr}`);
     }
     return prisma.attendanceBreak.create({
@@ -296,7 +289,7 @@ export const attendanceRepository = {
       data
     });
     if (res.employeeId) {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = formatDateIST(new Date());
       global._todayAttendanceCache.delete(`${res.employeeId}_${todayStr}`);
     }
     return res;
@@ -491,9 +484,7 @@ export const attendanceRepository = {
    * Daily attendance stats for company dashboard
    */
   async getAttendanceStats(companyId, date = new Date()) {
-    const targetDate = new Date(date);
-    const dateStr = targetDate.toISOString().split('T')[0];
-    const startOfDay = new Date(dateStr);
+    const startOfDay = startOfDayIST(date);
 
     const [totalEmployees, logs, departments] = await Promise.all([
       prisma.employee.count({
@@ -543,9 +534,9 @@ export const attendanceRepository = {
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now);
       d.setDate(d.getDate() - i);
-      const curDateStr = d.toISOString().split('T')[0];
-      const curDayDate = new Date(curDateStr);
-      const dayName = days[d.getDay()];
+      const curDayDate = startOfDayIST(d);
+      const curDateStr = formatDateIST(d);
+      const dayName = days[curDayDate.getDay()];
 
       const [dayPresent, dayLate] = await Promise.all([
         prisma.attendanceLog.count({

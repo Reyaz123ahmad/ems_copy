@@ -36,13 +36,19 @@ export function useRegisterFace() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data) => faceRegistrationService.registerFace(data),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
       const res = data?.data || data;
       if (res?.requiresApproval) {
         toast.info('Face registration request submitted. Waiting for HR approval.');
       } else {
         toast.success(res?.message || 'Face registered successfully');
       }
+      const empId = variables?.employeeId || res?.employeeId;
+      if (empId) {
+        queryClient.invalidateQueries({ queryKey: ['employee', empId] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      queryClient.invalidateQueries({ queryKey: ['employee-stats'] });
       queryClient.invalidateQueries({ queryKey: ['employeesWithFace'] });
       queryClient.invalidateQueries({ queryKey: ['employeesWithoutFace'] });
       queryClient.invalidateQueries({ queryKey: ['faceStatus'] });
