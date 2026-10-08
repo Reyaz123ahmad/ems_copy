@@ -1,0 +1,806 @@
+import crypto from 'crypto';
+import companiesRepository from './companies.repository.js';
+import authRepository from '../auth/auth.repository.js';
+import { hashPassword } from '../../security/password.js';
+import { COMPANY_SETTINGS_DEFAULTS, DEFAULT_TRIAL_DAYS } from './companies.constants.js';
+import { generateCompanyCode, generateBranchCode, generateDepartmentCode, generateEmployeeCode } from '../../utils/id-generator.js';
+import prisma from '../../config/prisma.js';
+
+export const companiesService = {
+  /**
+   * Complete Company Creation & Admin Provisioning
+   */
+  async createCompanyWithAdmin({ sessionId, companyData, adminData, planId }) {
+    // Resolve subscription plan
+    const selectedPlanId = planId || companyData?.planId;
+    let plan = null;
+    if (selectedPlanId) {
+      plan = await companiesRepository.findPlanById(selectedPlanId);
+    }
+    if (!plan) {
+      plan = await companiesRepository.findDefaultPlan();
+    }
+
+    // Generate random temporary password
+    const temporaryPassword = `Temp@${crypto.randomBytes(4).toString('hex')}!`;
+    const passwordHash = await hashPassword(temporaryPassword);
+
+    const isTrial = plan?.name?.toUpperCase() === 'TRIAL';
+    const initialStatus = isTrial ? 'TRIAL' : 'ACTIVE';
+    const trialDurationDays = isTrial ? DEFAULT_TRIAL_DAYS : 365;
+    const subscriptionEndDate = new Date(Date.now() + trialDurationDays * 86400000);
+
+    // Generate company code
+    const companyCode = await generateCompanyCode();
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create Company with default JSON settings
+      const company = await tx.company.create({
+        data: {
+          name: companyData.name,
+          companyCode,
+          domain: companyData.domain || null,
+          email: companyData.email || adminData.email,
+          phone: companyData.phone || adminData.phone || null,
+          address: companyData.address || null,
+          status: initialStatus,
+          attendanceSettings: COMPANY_SETTINGS_DEFAULTS.attendanceSettings,
+          securitySettings: COMPANY_SETTINGS_DEFAULTS.securitySettings,
+          leaveSettings: COMPANY_SETTINGS_DEFAULTS.leaveSettings,
+          payrollSettings: COMPANY_SETTINGS_DEFAULTS.payrollSettings,
+          notificationSettings: COMPANY_SETTINGS_DEFAULTS.notificationSettings,
+          generalSettings: COMPANY_SETTINGS_DEFAULTS.generalSettings
+        }
+      });
+
+      // 2. Create Subscription
+      const subscription = await tx.subscription.create({
+        data: {
+          companyId: company.id,
+          planId: plan.id,
+          status: initialStatus,
+          trialEndsAt: isTrial ? subscriptionEndDate : null,
+          startDate: new Date(),
+          endDate: subscriptionEndDate,
+          autoRenew: true
+        }
+      });
+
+      // 3. Create Admin User
+      const user = await tx.user.create({
+        data: {
+          companyId: company.id,
+          email: adminData.email,
+          phone: adminData.phone || null,
+          passwordHash,
+          status: 'ACTIVE',
+          twoFactorEnabled: false
+        }
+      });
+
+      // 4. Assign COMPANY_ADMIN role
+      const companyAdminRole = await tx.role.findFirst({
+        where: { name: 'COMPANY_ADMIN', companyId: null }
+      });
+
+      if (companyAdminRole) {
+        await tx.userRole.create({
+          data: {
+            userId: user.id,
+            roleId: companyAdminRole.id
+          }
+        });
+      }
+
+      // 5. Create default Branch
+      const branchCode = `${company.companyCode || 'COMP'}-BR-0001`;
+      const mainBranch = await tx.branch.create({
+        data: {
+          companyId: company.id,
+          name: 'Headquarters',
+          code: 'HQ-01',
+          branchCode,
+          city: 'Main Branch',
+          country: 'India',
+          isGeofenceActive: true,
+          geofenceRadius: 100
+        }
+      });
+
+      // 6. Create default Department
+      const departmentCode = `${company.companyCode || 'COMP'}-DEPT-0001`;
+      const mainDept = await tx.department.create({
+        data: {
+          companyId: company.id,
+          name: 'Administration',
+          code: 'ADM',
+          departmentCode
+        }
+      });
+
+      // 7. Create Employee profile for Admin
+      const employeeCode = `${company.companyCode || 'COMP'}-EMP-0001`;
+      const employee = await tx.employee.create({
+        data: {
+          companyId: company.id,
+          userId: user.id,
+          employeeCode,
+          firstName: adminData.firstName,
+          lastName: adminData.lastName,
+          email: adminData.email,
+          phone: adminData.phone || null,
+          branchId: mainBranch.id,
+          departmentId: mainDept.id,
+          joiningDate: new Date(),
+          employmentType: 'FULL_TIME',
+          status: 'ACTIVE'
+        }
+      });
+
+      // 8. CREATE DEFAULT SHIFT (General Shift 09:00 - 18:00)
+      const defaultShift = await tx.shift.create({
+        data: {
+          companyId: company.id,
+          name: 'General Shift',
+          startTime: '09:00',
+          endTime: '18:00',
+          graceMinutes: 15,
+          isNightShift: false,
+          workingHours: 8,
+          isActive: true
+        }
+      });
+
+      // 9. CREATE DEFAULT BREAK RULES
+      const lunchBreak = await tx.breakRule.create({
+        data: {
+          companyId: company.id,
+          name: 'Lunch Break',
+          durationMinutes: 30,
+          isPaid: false,
+          maxPerShift: 1,
+          isActive: true
+        }
+      });
+
+      const shortBreak = await tx.breakRule.create({
+        data: {
+          companyId: company.id,
+          name: 'Short Break',
+          durationMinutes: 15,
+          isPaid: true,
+          maxPerShift: 2,
+          isActive: true
+        }
+      });
+
+      // Link Break Rules to Shift
+      await tx.shiftBreakRule.createMany({
+        data: [
+          { shiftId: defaultShift.id, breakRuleId: lunchBreak.id },
+          { shiftId: defaultShift.id, breakRuleId: shortBreak.id }
+        ]
+      });
+
+      // 10. ASSIGN DEFAULT SHIFT TO COMPANY ADMIN EMPLOYEE
+      await tx.shiftAssignment.create({
+        data: {
+          employeeId: employee.id,
+          shiftId: defaultShift.id,
+          effectiveFrom: new Date(),
+          effectiveTo: null
+        }
+      });
+
+      // 11. CREATE DEFAULT LEAVE TYPES & INITIALIZE ADMIN LEAVE BALANCES
+      const currentYear = new Date().getFullYear();
+      const defaultLeaveTypes = [
+        { name: 'Casual Leave', code: 'CL', maxDaysPerYear: 12, isPaid: true },
+        { name: 'Sick Leave', code: 'SL', maxDaysPerYear: 10, isPaid: true },
+        { name: 'Earned Leave', code: 'EL', maxDaysPerYear: 15, isPaid: true }
+      ];
+
+      for (const lt of defaultLeaveTypes) {
+        const createdLt = await tx.leaveType.create({
+          data: {
+            companyId: company.id,
+            name: lt.name,
+            code: lt.code,
+            maxDaysPerYear: lt.maxDaysPerYear,
+            isPaid: lt.isPaid,
+            isActive: true
+          }
+        });
+
+        await tx.leaveBalance.create({
+          data: {
+            employeeId: employee.id,
+            leaveTypeId: createdLt.id,
+            year: currentYear,
+            totalDays: lt.maxDaysPerYear,
+            usedDays: 0,
+            remainingDays: lt.maxDaysPerYear
+          }
+        });
+      }
+
+      // 12. CREATE DEFAULT WEEKLY OFF RULE
+      await tx.weeklyOffRule.create({
+        data: {
+          companyId: company.id,
+          name: 'Sunday Off',
+          days: ['SUNDAY'],
+          isActive: true
+        }
+      });
+
+      // 13. Audit Log
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: 'CREATE_COMPANY',
+          entity: 'Company',
+          entityId: company.id,
+          newValues: {
+            companyName: company.name,
+            adminEmail: user.email,
+            plan: plan.name,
+            defaultShift: defaultShift.name
+          }
+        }
+      });
+
+      return { company, user, employee, subscription, shift: defaultShift };
+    }, {
+      maxWait: 10000,
+      timeout: 30000
+    });
+
+    return {
+      company: result.company,
+      admin: {
+        id: result.user.id,
+        email: result.user.email,
+        name: `${adminData.firstName} ${adminData.lastName}`
+      },
+      employee: result.employee,
+      shift: result.shift,
+      message: 'Company and Administrator account provisioned successfully.'
+    };
+  },
+
+  /**
+   * Fetch company structured settings
+   */
+  async getCompanySettings(companyId) {
+    const company = await companiesRepository.findCompanyById(companyId);
+    if (!company) throw new Error('Company not found');
+
+    return {
+      attendanceSettings: company.attendanceSettings,
+      securitySettings: company.securitySettings,
+      leaveSettings: company.leaveSettings,
+      payrollSettings: company.payrollSettings,
+      notificationSettings: company.notificationSettings,
+      generalSettings: company.generalSettings
+    };
+  },
+
+  /**
+   * Update specific structured settings tab
+   */
+  async updateCompanySettings(companyId, settingsType, settingsData) {
+    const fieldMap = {
+      attendance: 'attendanceSettings',
+      security: 'securitySettings',
+      leave: 'leaveSettings',
+      payroll: 'payrollSettings',
+      notifications: 'notificationSettings',
+      general: 'generalSettings'
+    };
+
+    const field = fieldMap[settingsType];
+    if (!field) throw new Error(`Invalid settings type: ${settingsType}`);
+
+    const updated = await companiesRepository.updateCompanySettings(companyId, field, settingsData);
+    return updated;
+  },
+
+  /**
+   * Get dedicated statutory and rule configuration for company payroll
+   */
+  async getPayrollConfig(companyId) {
+    const company = await prisma.company.findUnique({
+      where: { id: companyId }
+    });
+    if (!company) throw new Error('Company not found');
+
+    const payrollSettings = (typeof company.payrollSettings === 'object' && company.payrollSettings !== null)
+      ? company.payrollSettings
+      : {};
+
+    return {
+      basicPercentOfCTC: Number(payrollSettings.basicPercentOfCTC ?? 40),
+      hraPercentOfCTC: Number(payrollSettings.hraPercentOfCTC ?? 20),
+      specialPercentOfCTC: Number(payrollSettings.specialPercentOfCTC ?? 40),
+      pfEnabled: company.pfEnabled ?? true,
+      pfEmployeePercent: Number(company.pfEmployeePercent ?? 12),
+      pfEmployerPercent: Number(company.pfEmployerPercent ?? 12),
+      pfCeiling: Number(company.pfCeiling ?? 15000),
+      esiEnabled: company.esiEnabled ?? true,
+      esiEmployeePercent: Number(company.esiEmployeePercent ?? 0.75),
+      esiEmployerPercent: Number(company.esiEmployerPercent ?? 3.25),
+      esiCeiling: Number(company.esiCeiling ?? 21000),
+      ptState: company.ptState || 'MAHARASHTRA',
+      tdsEnabled: company.tdsEnabled ?? true,
+      lopDivisor: Number(company.lopDivisor ?? 30),
+      lateMarksForHalfDay: Number(company.lateMarksForHalfDay ?? 3),
+      overtimeRate: Number(company.overtimeRate ?? 125),
+      roundOffRule: company.roundOffRule || 'NEAREST_RUPEE',
+      payrollCycleStartDay: Number(company.payrollCycleStartDay ?? 1),
+      payrollCycleEndDay: Number(company.payrollCycleEndDay ?? 0),
+      payrollRunDay: Number(company.payrollRunDay ?? 1),
+      payrollRunTime: company.payrollRunTime || '00:05',
+      payrollAutoRunEnabled: company.payrollAutoRunEnabled ?? false
+    };
+  },
+
+  /**
+   * Update dedicated statutory and rule configuration for company payroll
+   */
+  async updatePayrollConfig(companyId, payload) {
+    const existing = await prisma.company.findUnique({ where: { id: companyId } });
+    if (!existing) throw new Error('Company not found');
+
+    const existingSettings = (typeof existing.payrollSettings === 'object' && existing.payrollSettings !== null)
+      ? existing.payrollSettings
+      : {};
+
+    const updatedSettings = {
+      ...existingSettings,
+      basicPercentOfCTC: payload.basicPercentOfCTC !== undefined ? Number(payload.basicPercentOfCTC) : Number(existingSettings.basicPercentOfCTC ?? 40),
+      hraPercentOfCTC: payload.hraPercentOfCTC !== undefined ? Number(payload.hraPercentOfCTC) : Number(existingSettings.hraPercentOfCTC ?? 20),
+      specialPercentOfCTC: payload.specialPercentOfCTC !== undefined ? Number(payload.specialPercentOfCTC) : Number(existingSettings.specialPercentOfCTC ?? 40)
+    };
+
+    const updateData = {
+      payrollSettings: updatedSettings
+    };
+
+    if (payload.pfEnabled !== undefined) updateData.pfEnabled = Boolean(payload.pfEnabled);
+    if (payload.pfEmployeePercent !== undefined) updateData.pfEmployeePercent = Number(payload.pfEmployeePercent);
+    if (payload.pfEmployerPercent !== undefined) updateData.pfEmployerPercent = Number(payload.pfEmployerPercent);
+    if (payload.pfCeiling !== undefined) updateData.pfCeiling = Number(payload.pfCeiling);
+    if (payload.esiEnabled !== undefined) updateData.esiEnabled = Boolean(payload.esiEnabled);
+    if (payload.esiEmployeePercent !== undefined) updateData.esiEmployeePercent = Number(payload.esiEmployeePercent);
+    if (payload.esiEmployerPercent !== undefined) updateData.esiEmployerPercent = Number(payload.esiEmployerPercent);
+    if (payload.esiCeiling !== undefined) updateData.esiCeiling = Number(payload.esiCeiling);
+    if (payload.ptState !== undefined) updateData.ptState = payload.ptState;
+    if (payload.tdsEnabled !== undefined) updateData.tdsEnabled = Boolean(payload.tdsEnabled);
+    if (payload.lopDivisor !== undefined) updateData.lopDivisor = Number(payload.lopDivisor);
+    if (payload.lateMarksForHalfDay !== undefined) updateData.lateMarksForHalfDay = Number(payload.lateMarksForHalfDay);
+    if (payload.overtimeRate !== undefined) updateData.overtimeRate = Number(payload.overtimeRate);
+    if (payload.roundOffRule !== undefined) updateData.roundOffRule = payload.roundOffRule;
+    if (payload.payrollCycleStartDay !== undefined) updateData.payrollCycleStartDay = Number(payload.payrollCycleStartDay);
+    if (payload.payrollCycleEndDay !== undefined) updateData.payrollCycleEndDay = Number(payload.payrollCycleEndDay);
+    if (payload.payrollRunDay !== undefined) updateData.payrollRunDay = Number(payload.payrollRunDay);
+    if (payload.payrollRunTime !== undefined) updateData.payrollRunTime = payload.payrollRunTime;
+    if (payload.payrollAutoRunEnabled !== undefined) updateData.payrollAutoRunEnabled = Boolean(payload.payrollAutoRunEnabled);
+
+    await prisma.company.update({
+      where: { id: companyId },
+      data: updateData
+    });
+
+    return this.getPayrollConfig(companyId);
+  },
+
+  /**
+   * Get company dashboard metrics
+   */
+  async getCompanyDashboard(companyId) {
+    const company = await companiesRepository.findCompanyById(companyId);
+    if (!company) throw new Error('Company not found');
+
+    const totalEmployees = await prisma.employee.count({ where: { companyId } });
+    const activeEmployees = await prisma.employee.count({ where: { companyId, status: 'ACTIVE' } });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const todayAttendance = await prisma.attendanceLog.count({
+      where: {
+        companyId,
+        attendanceDate: today,
+        status: 'PRESENT'
+      }
+    });
+
+    const pendingLeaves = await prisma.leaveRequest.count({
+      where: {
+        employee: { companyId },
+        status: 'PENDING'
+      }
+    });
+
+    return {
+      company,
+      metrics: {
+        totalEmployees,
+        activeEmployees,
+        todayAttendance,
+        pendingLeaves
+      }
+    };
+  },
+
+  /**
+   * List companies with search and filters
+   */
+  async listCompanies(filters, pagination) {
+    return companiesRepository.findAllCompanies(filters, pagination);
+  },
+
+  /**
+   * Get single company by ID
+   */
+  async getCompanyById(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) throw new Error('Company not found');
+    return company;
+  },
+
+  /**
+   * Get company stats
+   */
+  async getCompanyStats(companyId) {
+    if (!companyId) {
+      const [totalCompanies, activeCompanies, totalEmployees] = await Promise.all([
+        prisma.company.count(),
+        prisma.company.count({ where: { status: 'ACTIVE' } }),
+        prisma.employee.count()
+      ]);
+      return {
+        totalCompanies,
+        activeCompanies,
+        totalEmployees
+      };
+    }
+
+    const company = await companiesRepository.findCompanyById(companyId);
+    if (!company) {
+      return {
+        companyId,
+        companyName: 'N/A',
+        status: 'ACTIVE',
+        stats: { totalEmployees: 0, activeEmployees: 0, presentToday: 0 }
+      };
+    }
+
+    const totalEmployees = await prisma.employee.count({ where: { companyId } });
+    const activeEmployees = await prisma.employee.count({ where: { companyId, status: 'ACTIVE' } });
+    const departmentCount = await prisma.department.count({ where: { companyId } });
+    const branchCount = await prisma.branch.count({ where: { companyId } });
+    const deviceCount = await prisma.biometricDevice.count({ where: { companyId } });
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [presentCount, lateCount, leaveCount] = await Promise.all([
+      prisma.attendanceLog.count({
+        where: { companyId, attendanceDate: today, status: 'PRESENT' }
+      }),
+      prisma.attendanceLog.count({
+        where: { companyId, attendanceDate: today, status: 'LATE' }
+      }),
+      prisma.leaveRequest.count({
+        where: { employee: { companyId }, status: 'APPROVED', startDate: { lte: today }, endDate: { gte: today } }
+      })
+    ]);
+
+    const absentCount = Math.max(0, activeEmployees - presentCount - lateCount - leaveCount);
+
+    return {
+      companyId,
+      companyName: company.name,
+      status: company.status,
+      subscription: company.subscription,
+      stats: {
+        totalEmployees,
+        activeEmployees,
+        presentToday: presentCount + lateCount,
+        onTimeToday: presentCount,
+        lateToday: lateCount,
+        absentToday: absentCount,
+        onLeaveToday: leaveCount,
+        departmentCount,
+        branchCount,
+        deviceCount
+      }
+    };
+  },
+
+  /**
+   * Get company analytics across date range
+   */
+  async getCompanyAnalytics(companyId, dateRange = {}) {
+    if (!companyId) {
+      const [totalCompanies, totalEmployees] = await Promise.all([
+        prisma.company.count(),
+        prisma.employee.count()
+      ]);
+      return {
+        totalCompanies,
+        totalEmployees,
+        growth: '+14.2%'
+      };
+    }
+
+    const company = await companiesRepository.findCompanyById(companyId);
+    if (!company) {
+      return {
+        companyId,
+        totalLogs: 0,
+        departmentDistribution: []
+      };
+    }
+
+    const startDate = dateRange.startDate ? new Date(dateRange.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const endDate = dateRange.endDate ? new Date(dateRange.endDate) : new Date();
+
+    const attendanceLogs = await prisma.attendanceLog.findMany({
+      where: {
+        companyId,
+        attendanceDate: {
+          gte: startDate,
+          lte: endDate
+        }
+      },
+      select: {
+        attendanceDate: true,
+        status: true
+      }
+    });
+
+    const departments = await prisma.department.findMany({
+      where: { companyId },
+      include: {
+        _count: {
+          select: { employees: true }
+        }
+      }
+    });
+
+    return {
+      companyId,
+      dateRange: { startDate, endDate },
+      totalLogs: attendanceLogs.length,
+      departmentDistribution: departments.map((d) => ({
+        id: d.id,
+        name: d.name,
+        employeeCount: d._count.employees
+      }))
+    };
+  },
+
+  /**
+   * Get company by ID
+   */
+  async getCompanyById(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) {
+      const err = new Error('Company not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    return company;
+  },
+
+  /**
+   * List all companies
+   */
+  async listCompanies(filters = {}, pagination = { page: 1, limit: 10 }) {
+    return companiesRepository.findAllCompanies(filters, pagination);
+  },
+
+  /**
+   * Update company details
+   */
+  async updateCompany(id, data) {
+    return companiesRepository.updateCompany(id, data);
+  },
+
+  /**
+   * Activate company
+   */
+  async activateCompany(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) {
+      const err = new Error('Company not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const comp = await tx.company.update({
+        where: { id },
+        data: { status: 'ACTIVE' }
+      });
+      await tx.subscription.updateMany({
+        where: { companyId: id },
+        data: { status: 'ACTIVE' }
+      });
+      await tx.user.updateMany({
+        where: { companyId: id },
+        data: { status: 'ACTIVE' }
+      });
+      return comp;
+    });
+    return updated;
+  },
+
+  /**
+   * Deactivate company
+   */
+  async deactivateCompany(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) {
+      const err = new Error('Company not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const comp = await tx.company.update({
+        where: { id },
+        data: { status: 'EXPIRED' }
+      });
+      await tx.subscription.updateMany({
+        where: { companyId: id },
+        data: { status: 'EXPIRED' }
+      });
+      return comp;
+    });
+    return updated;
+  },
+
+  /**
+   * Suspend company
+   */
+  async suspendCompany(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) {
+      const err = new Error('Company not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const comp = await tx.company.update({
+        where: { id },
+        data: { status: 'SUSPENDED' }
+      });
+      await tx.subscription.updateMany({
+        where: { companyId: id },
+        data: { status: 'CANCELLED' }
+      });
+      return comp;
+    });
+    return updated;
+  },
+
+  /**
+   * Delete company and all associated child entities
+   */
+  async deleteCompany(id) {
+    const company = await companiesRepository.findCompanyById(id);
+    if (!company) {
+      const err = new Error('Company not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const employees = await prisma.employee.findMany({ where: { companyId: id }, select: { id: true } });
+    const employeeIds = employees.map((e) => e.id);
+
+    const users = await prisma.user.findMany({ where: { companyId: id }, select: { id: true } });
+    const userIds = users.map((u) => u.id);
+
+    // 1. Biometrics & Devices
+    if (employeeIds.length > 0) {
+      await prisma.deviceChangeRequest.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.employeeDevice.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.fingerEnrollment.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.faceRegistrationLog.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.livenessVerification.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.fraudSignal.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.attendanceBreak.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.leaveBalance.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.leaveRequest.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.employeeCard.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.employeeDocument.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.employeeCertificate.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.employeeSalaryStructure.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.payrollItem.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.task.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.projectMember.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.emergencyAttendance.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.performanceReview.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.goal.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.assetAssignment.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.shiftAssignment.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.roster.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.weeklyOffAssignment.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.overtimeRecord.deleteMany({ where: { employeeId: { in: employeeIds } } });
+      await prisma.overtimeRequest.deleteMany({ where: { employeeId: { in: employeeIds } } });
+    }
+
+    await prisma.devicePunch.deleteMany({ where: { companyId: id } });
+    await prisma.attendanceLog.deleteMany({ where: { companyId: id } });
+    await prisma.leaveType.deleteMany({ where: { companyId: id } });
+    await prisma.overtimeRule.deleteMany({ where: { companyId: id } });
+    await prisma.breakRule.deleteMany({ where: { companyId: id } });
+    await prisma.shift.deleteMany({ where: { companyId: id } });
+    await prisma.weeklyOffRule.deleteMany({ where: { companyId: id } });
+    await prisma.holidayCalendar.deleteMany({ where: { companyId: id } });
+    await prisma.salaryComponent.deleteMany({ where: { companyId: id } });
+    await prisma.payrollRun.deleteMany({ where: { companyId: id } });
+    await prisma.project.deleteMany({ where: { companyId: id } });
+    await prisma.client.deleteMany({ where: { companyId: id } });
+    await prisma.asset.deleteMany({ where: { companyId: id } });
+    await prisma.reportHistory.deleteMany({ where: { companyId: id } });
+    await prisma.biometricDevice.deleteMany({ where: { companyId: id } });
+
+    // 2. Employees, Users & Roles
+    await prisma.employee.deleteMany({ where: { companyId: id } });
+    if (userIds.length > 0) {
+      await prisma.loginLog.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.securityEvent.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.userRole.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    }
+    await prisma.user.deleteMany({ where: { companyId: id } });
+
+    await prisma.designation.deleteMany({ where: { companyId: id } });
+    await prisma.department.deleteMany({ where: { companyId: id } });
+    await prisma.branch.deleteMany({ where: { companyId: id } });
+
+    await prisma.rolePermission.deleteMany({ where: { role: { companyId: id } } });
+    await prisma.role.deleteMany({ where: { companyId: id } });
+
+    await prisma.auditLog.deleteMany({ where: { entityId: id } });
+    await prisma.securityEvent.deleteMany({ where: { companyId: id } });
+
+    // 3. Subscriptions & Payments
+    const subscriptions = await prisma.subscription.findMany({ where: { companyId: id }, select: { id: true } });
+    const subIds = subscriptions.map((s) => s.id);
+    if (subIds.length > 0) {
+      const payments = await prisma.paymentTransaction.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
+      const paymentIds = payments.map((p) => p.id);
+      if (paymentIds.length > 0) {
+        await prisma.refundRequest.deleteMany({ where: { paymentId: { in: paymentIds } } });
+        await prisma.paymentTransaction.deleteMany({ where: { id: { in: paymentIds } } });
+      }
+      await prisma.invoice.deleteMany({ where: { subscriptionId: { in: subIds } } });
+      await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    }
+
+    await prisma.refundRequest.deleteMany({ where: { companyId: id } });
+    await prisma.coupon.deleteMany({ where: { companyId: id } });
+
+    // 4. Approvals, Notifications & AI Logs
+    const workflows = await prisma.approvalWorkflow.findMany({ where: { companyId: id }, select: { id: true } });
+    const workflowIds = workflows.map((w) => w.id);
+    if (workflowIds.length > 0) {
+      await prisma.approvalRequest.deleteMany({ where: { workflowId: { in: workflowIds } } });
+    }
+    await prisma.approvalWorkflow.deleteMany({ where: { companyId: id } });
+    await prisma.aIInsight.deleteMany({ where: { companyId: id } });
+    await prisma.aIUsageLog.deleteMany({ where: { companyId: id } });
+    await prisma.notificationTemplate.deleteMany({ where: { companyId: id } });
+
+    // 5. Finally delete Company
+    await prisma.company.deleteMany({ where: { id } });
+    return { id };
+  }
+};
+
+export default companiesService;

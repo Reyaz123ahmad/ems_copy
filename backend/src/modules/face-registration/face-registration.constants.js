@@ -1,0 +1,22 @@
+export const EMBEDDING_DIMENSIONS = 128;
+export const FACE_MATCH_MAX_DISTANCE = 0.50; // Strict Euclidean distance limit (< 0.50)
+export const FACE_MATCH_THRESHOLD = 0.50; // Strict maximum distance threshold
+export const LIVENESS_THRESHOLD = 0.85;
+export const MAX_REGISTRATION_ATTEMPTS = 3;
+export const FACE_PHOTO_MAX_SIZE = 5 * 1024 * 1024; // 5MB
+
+export const FACE_REGISTRATION_ACTIONS = {
+  REGISTER: 'REGISTER',
+  UPDATE: 'UPDATE',
+  DELETE: 'DELETE',
+  BULK_REGISTER: 'BULK_REGISTER'
+};
+
+export default {
+  EMBEDDING_DIMENSIONS,
+  FACE_MATCH_THRESHOLD,
+  LIVENESS_THRESHOLD,
+  MAX_REGISTRATION_ATTEMPTS,
+  FACE_PHOTO_MAX_SIZE,
+  FACE_REGISTRATION_ACTIONS
+};

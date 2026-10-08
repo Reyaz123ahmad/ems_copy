@@ -1,0 +1,122 @@
+import api from './api.js';
+
+export const companyService = {
+  /**
+   * Create Company and Admin Account
+   * @param {Object} data { companyData, adminData, planId }
+   */
+  async createCompanyWithAdmin(data) {
+    const response = await api.post('/companies/create', data);
+    return response.data;
+  },
+
+  /**
+   * Fetch all companies (Super Admin)
+   * @param {Object} [params] { page, limit, search, status }
+   */
+  async getCompanies(params = {}) {
+    const response = await api.get('/companies', { params });
+    return response.data;
+  },
+
+  /**
+   * Fetch company by ID
+   * @param {string} id
+   */
+  async getCompany(id) {
+    const response = await api.get(`/companies/${id}`);
+    return response.data;
+  },
+
+  /**
+   * Update existing company
+   * @param {string} id
+   * @param {Object} data
+   */
+  async updateCompany(id, data) {
+    const response = await api.put(`/companies/${id}`, data);
+    return response.data;
+  },
+
+  /**
+   * Get company configuration settings
+   * @param {string} id
+   */
+  async getCompanySettings(id) {
+    const response = await api.get(`/companies/${id}/settings`);
+    return response.data;
+  },
+
+  /**
+   * Update company configuration settings
+   * @param {string} id
+   * @param {string} settingsType
+   * @param {Object} settingsData
+   */
+  async updateCompanySettings(id, settingsType, settingsData) {
+    const response = await api.put(`/companies/${id}/settings`, {
+      settingsType,
+      settingsData
+    });
+    return response.data;
+  },
+
+  /**
+   * Get company analytics dashboard
+   * @param {string} id
+   */
+  async getCompanyDashboard(id) {
+    const response = await api.get(`/companies/${id}/dashboard`);
+    return response.data;
+  },
+
+  /**
+   * Get overall company stats
+   */
+  async getCompanyStats() {
+    const response = await api.get('/companies/stats');
+    return response.data;
+  },
+
+  /**
+   * Get company analytics
+   */
+  async getCompanyAnalytics(params = {}) {
+    const response = await api.get('/companies/analytics', { params });
+    return response.data;
+  },
+
+  /**
+   * Activate company
+   */
+  async activateCompany(id) {
+    const response = await api.post(`/companies/${id}/activate`);
+    return response.data;
+  },
+
+  /**
+   * Deactivate company
+   */
+  async deactivateCompany(id) {
+    const response = await api.post(`/companies/${id}/deactivate`);
+    return response.data;
+  },
+
+  /**
+   * Suspend company
+   */
+  async suspendCompany(id) {
+    const response = await api.post(`/companies/${id}/suspend`);
+    return response.data;
+  },
+
+  /**
+   * Delete company
+   */
+  async deleteCompany(id) {
+    const response = await api.delete(`/companies/${id}`);
+    return response.data;
+  }
+};
+
+export default companyService;
