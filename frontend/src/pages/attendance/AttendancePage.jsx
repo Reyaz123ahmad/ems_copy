@@ -40,7 +40,7 @@ export const AttendancePage = () => {
   const {
     todayStatus,
     setTodayStatus,
-    isCheckedIn,
+    isCheckedIn: storeIsCheckedIn,
     isOnBreak,
     activeBreak,
     breaks,
@@ -85,6 +85,11 @@ export const AttendancePage = () => {
 
   // Consolidated holiday & shift metadata - prioritize fresh server response
   const effectiveData = statusResponse?.data || todayStatus;
+  const isCheckedIn = Boolean(
+    effectiveData?.isCheckedIn ||
+    (effectiveData?.attendance?.checkInAt && !effectiveData?.attendance?.checkOutAt) ||
+    storeIsCheckedIn
+  );
   const holiday = effectiveData?.holiday;
   const weeklyOff = effectiveData?.weeklyOff;
   const leave = effectiveData?.leave;

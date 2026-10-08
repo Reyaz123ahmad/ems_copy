@@ -61,12 +61,18 @@ export function useCheckIn() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data) => attendanceService.checkIn(data),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      const attendance = res?.data?.attendance || res?.attendance || res?.data;
+      if (attendance) {
+        useAttendanceStore.getState().updateCheckIn(attendance);
+      }
       queryClient.invalidateQueries({ queryKey: ['attendance', 'today'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'checkout-status'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'break-status'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'logs'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'stats'] });
+      queryClient.invalidateQueries({ queryKey: ['attendance'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     }
   });
 }
@@ -75,12 +81,18 @@ export function useCheckOut() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data) => attendanceService.checkOut(data),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      const attendance = res?.data?.attendance || res?.attendance || res?.data;
+      if (attendance) {
+        useAttendanceStore.getState().updateCheckOut(attendance);
+      }
       queryClient.invalidateQueries({ queryKey: ['attendance', 'today'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'checkout-status'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'break-status'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'logs'] });
       queryClient.invalidateQueries({ queryKey: ['attendance', 'stats'] });
+      queryClient.invalidateQueries({ queryKey: ['attendance'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     }
   });
 }
